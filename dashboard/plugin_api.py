@@ -7,7 +7,9 @@ ROTATE_TOKEN_THRESHOLD / ROTATE_EXCLUDE 可直接共用）：
 - last_in：该 sid 在 logs/agent.log* 里最后一笔 "API call #N:" 的 in=
   （全量输入 token，含缓存命中 ≈ 当前上下文实长）；多文件时新文件覆盖旧文件
 - 忙碌：session_turn_leases 存在未过期行（expires_at > now 或 NULL）
-- 阈值：250,000（ROTATE_TOKEN_THRESHOLD 环境变量可覆盖，与 cron 同名同义）
+- 阈值：**按模型上下文窗口取比例**——threshold = context_length(model) × 0.80，
+  窗口从 Hermes `agent.model_metadata.get_model_context_length()` 取（本地缓存，毫秒级）；
+  该函数不可用或返回 0 时回退 ROTATE_TOKEN_THRESHOLD / LAST_IN_THRESHOLD（默认 250,000）。
 - 排除：default、gameplayer（LAST_IN_EXCLUDE 可覆盖，与 cron ROTATE_EXCLUDE 同义）
 
 只读：state.db 以 mode=ro 打开，日志只读，不写任何文件。
@@ -31,11 +33,37 @@ log = __import__("logging").getLogger(__name__)
 
 router = APIRouter()
 
-THRESHOLD = int(os.environ.get("ROTATE_TOKEN_THRESHOLD", os.environ.get("LAST_IN_THRESHOLD", "250000")))
+THRESHOLD_FALLBACK = int(os.environ.get("ROTATE_TOKEN_THRESHOLD", os.environ.get("LAST_IN_THRESHOLD", "250000")))
+THRESHOLD_RATIO = float(os.environ.get("LAST_IN_THRESHOLD_RATIO", "0.80"))
 EXCLUDE = set(filter(None, os.environ.get(
     "LAST_IN_EXCLUDE", os.environ.get("ROTATE_EXCLUDE", "default,gameplayer")).split(",")))
 
 PROFILES_ROOT = Path.home() / ".hermes" / "profiles"
+
+# model → context_length 缓存（get_model_context_length 有本地缓存但仍有函数开销）
+_WINDOW_CACHE: dict[str, int] = {}
+
+
+def model_window(model: Optional[str]) -> int:
+    """模型上下文窗口（Hermes 权威口径）；取不到返回 0。"""
+    if not model:
+        return 0
+    if model in _WINDOW_CACHE:
+        return _WINDOW_CACHE[model]
+    w = 0
+    try:
+        from agent.model_metadata import get_model_context_length
+        w = int(get_model_context_length(model) or 0)
+    except Exception:
+        w = 0
+    _WINDOW_CACHE[model] = w
+    return w
+
+
+def threshold_for(model: Optional[str]) -> int:
+    """阈值 = 窗口 × 比例；窗口未知时回退固定值。"""
+    w = model_window(model)
+    return round(w * THRESHOLD_RATIO) if w else THRESHOLD_FALLBACK
 
 _SID_ROW = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 _CALL = re.compile(r"API call #\d+:")
@@ -46,20 +74,25 @@ _CACHE: dict[str, tuple[int, int, dict[str, tuple[int, Optional[float]]]]] = {}
 
 
 def _canonical_sid(profile_dir: Path) -> Optional[str]:
+    return _canonical_row(profile_dir)[0]
+
+
+def _canonical_row(profile_dir: Path) -> tuple[Optional[str], Optional[str]]:
+    """(sid, model) of the canonical Bot Chat; (None, None) when absent."""
     db = profile_dir / "state.db"
     if not db.is_file():
-        return None
+        return None, None
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
         try:
             row = con.execute(
-                "SELECT id FROM sessions WHERE title='Bot Chat' AND archived=0 "
+                "SELECT id, model FROM sessions WHERE title='Bot Chat' AND archived=0 "
                 "ORDER BY started_at DESC LIMIT 1").fetchone()
         finally:
             con.close()
     except sqlite3.Error:
-        return None
-    return row[0] if row else None
+        return None, None
+    return (row[0], row[1]) if row else (None, None)
 
 
 def _is_busy(profile_dir: Path) -> bool:
@@ -155,23 +188,30 @@ def collect_snapshot() -> dict[str, Any]:
             if child.name in EXCLUDE:
                 excluded.append(child.name)
                 continue
-            sid = _canonical_sid(child)
+            sid, model = _canonical_row(child)
             if sid is None:
-                bots.append({"profile": child.name, "sid": None, "last_in": 0,
+                bots.append({"profile": child.name, "sid": None, "model": None,
+                             "last_in": 0, "threshold": THRESHOLD_FALLBACK,
+                             "window": 0, "pct": 0.0,
                              "busy": False, "last_call_at": None, "source": "no_bot_chat"})
                 continue
             last_in, ts = _last_in(child, sid)
+            window = model_window(model)
+            th = round(window * THRESHOLD_RATIO) if window else THRESHOLD_FALLBACK
             bots.append({
-                "profile": child.name, "sid": sid, "last_in": last_in,
+                "profile": child.name, "sid": sid, "model": model, "last_in": last_in,
+                "threshold": th, "window": window,
+                "pct": round(last_in * 100.0 / th, 1) if th else 0.0,
                 "busy": _is_busy(child), "last_call_at": ts,
                 "source": "log" if last_in else "log_empty"})
-    bots.sort(key=lambda b: (-b["last_in"], b["profile"]))
+    bots.sort(key=lambda b: (-(b.get("pct") or 0), b["profile"]))
     return {
         "bots": bots,
-        "threshold": THRESHOLD,
+        "threshold_fallback": THRESHOLD_FALLBACK,
+        "threshold_ratio": THRESHOLD_RATIO,
         "excluded": sorted(excluded),
         "count": len(bots),
-        "over_threshold": sum(1 for b in bots if b["last_in"] >= THRESHOLD),
+        "over_threshold": sum(1 for b in bots if b["last_in"] >= b["threshold"]),
         "busy_count": sum(1 for b in bots if b["busy"]),
         "generated_at": now,
         "scan_ms": round((time.time() - t0) * 1000),

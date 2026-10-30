@@ -29,9 +29,12 @@ function relTime(epoch) {
   return Math.round(dt / 86400) + 'd'
 }
 
-/** 单行：席名 last_in 忙点。over 时整行警示色。 */
-function BotRow({ b, threshold }) {
-  const over = b.last_in >= threshold
+/** 单行：席名 last_in/阈值 忙点。超阈警示色；近阈（≥85%）提示色。 */
+function BotRow({ b }) {
+  const th = b.threshold || 0
+  const pct = th ? (b.last_in * 100) / th : 0
+  const over = th > 0 && b.last_in >= th
+  const near = !over && pct >= 85
   const dot = jsx('span', {
     className: 'shrink-0 w-1.5 h-1.5 rounded-full ' +
       (b.busy
@@ -39,21 +42,27 @@ function BotRow({ b, threshold }) {
         : 'bg-transparent border border-(--ui-stroke-tertiary)'),
     title: b.busy ? '回合进行中' : '空闲'
   })
-  const name = jsx('span', { className: 'truncate font-medium', children: b.profile })
+  const name = jsx('span', {
+    className: 'truncate font-medium',
+    title: (b.model || '?') + (b.window ? ' · 窗口 ' + fmtK(b.window) : ''),
+    children: b.profile
+  })
   const left = jsxs('span', {
     className: 'flex items-center gap-1.5 min-w-0',
     children: [dot, name]
   })
   const right = jsxs('span', {
     className: 'shrink-0 tabular-nums',
+    title: '阈值 ' + fmtK(th) + (b.window ? '（窗口 ' + fmtK(b.window) + ' × 80%）' : ''),
     children: [
       fmtK(b.last_in),
+      jsx('span', { className: 'text-(--ui-text-quaternary) ml-1', children: Math.round(pct) + '%' }),
       jsx('span', { className: 'text-(--ui-text-quaternary) ml-1', children: relTime(b.last_call_at) })
     ]
   })
   return jsxs('div', {
     className: 'flex items-center justify-between gap-2 px-1.5 py-[3px] rounded text-xs ' +
-      (over ? 'text-(--ui-red)' : 'text-(--ui-text-secondary)'),
+      (over ? 'text-(--ui-red)' : near ? 'text-(--ui-text-secondary)' : 'text-(--ui-text-tertiary)'),
     children: [left, right]
   })
 }
@@ -90,7 +99,7 @@ function FleetPane() {
   if (!snap) {
     return jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: '加载中…' })
   }
-  const th = snap.threshold || 250000
+  const ratio = Math.round((snap.threshold_ratio || 0.8) * 100)
   return jsxs('div', {
     className: 'flex h-full flex-col gap-1.5 p-2 text-sm overflow-y-auto',
     children: [
@@ -101,7 +110,7 @@ function FleetPane() {
           jsxs('span', {
             className: 'text-xs tabular-nums text-(--ui-text-quaternary)',
             children: [
-              '≥' + fmtK(th) + ' · ' + snap.over_threshold + '/' + snap.count + ' 超阈',
+              '阈值=窗口×' + ratio + '% · ' + snap.over_threshold + '/' + snap.count + ' 超阈',
               snap.scan_ms != null ? ' · ' + snap.scan_ms + 'ms' : ''
             ]
           })
@@ -109,7 +118,7 @@ function FleetPane() {
       }),
       jsx('div', {
         className: 'flex flex-col',
-        children: snap.bots.map(b => jsx(BotRow, { b, threshold: th }, b.profile))
+        children: snap.bots.map(b => jsx(BotRow, { b }, b.profile))
       }),
       jsx('div', {
         className: 'px-1.5 pt-1 text-[10px] text-(--ui-text-quaternary)',

@@ -17,7 +17,7 @@ Hermes Agent 桌面 App 的插件：一屏显示**每个 profile 的 Bot Chat �
 | canonical Bot Chat | 各 profile `state.db` | `WHERE title='Bot Chat' AND archived=0 ORDER BY started_at DESC LIMIT 1` |
 | `last_in` | 各 profile `logs/agent.log*` | 该会话最后一笔 `API call #N: … in=<n> out=` 的 `in=`（含缓存命中 ≈ 上下文实长） |
 | 忙碌 | `state.db` `session_turn_leases` | 存在未过期租约 = 回合进行中（重启/轮换会打断它） |
-| 阈值 | 默认 250,000 | 环境变量 `ROTATE_TOKEN_THRESHOLD`（或 `LAST_IN_THRESHOLD`）覆盖 |
+| 阈值 | **按模型上下文窗口取比例**：`threshold = context_length(model) × 0.80` | 窗口从 Hermes `agent.model_metadata.get_model_context_length()` 取（本地缓存，毫秒级）；取不到时回退 `ROTATE_TOKEN_THRESHOLD`（默认 250,000）。比例可用 `LAST_IN_THRESHOLD_RATIO` 覆盖 |
 | 排除名单 | 默认 `default,gameplayer` | 环境变量 `LAST_IN_EXCLUDE`（或 `ROTATE_EXCLUDE`）覆盖，逗号分隔 |
 
 只读实现：`state.db` 以 `mode=ro` 打开；日志只读；文件级 mtime/size 缓存避免重复解析。
@@ -41,13 +41,18 @@ Hermes Agent 桌面 App 的插件：一屏显示**每个 profile 的 Bot Chat �
 
 ```json
 {
-  "bots": [{"profile": "pm", "sid": "2026…", "last_in": 514016, "busy": false,
-            "last_call_at": 1793…, "source": "log"}],
-  "threshold": 250000, "excluded": ["default", "gameplayer"],
+  "bots": [{"profile": "pm", "sid": "2026…", "model": "gpt-6.1-sol",
+            "last_in": 514016, "threshold": 840000, "window": 1050000, "pct": 61.2,
+            "busy": false, "last_call_at": 1793…, "source": "log"}],
+  "threshold_fallback": 250000, "threshold_ratio": 0.8,
+  "excluded": ["default", "gameplayer"],
   "count": 36, "over_threshold": 2, "busy_count": 1,
   "generated_at": 1793…, "scan_ms": 2045
 }
 ```
+
+每席的 `threshold` 由该席 canonical Bot Chat 的 `model` 列查窗口后算出（`window × 0.8`）；
+`pct` = last_in / threshold。前端按 `pct` 排序（最危险的排最上），≥85% 提示色、≥100% 红色。
 
 ## 已验证环境
 
