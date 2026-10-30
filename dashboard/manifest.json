@@ -1,0 +1,8 @@
+{
+  "name": "last-in",
+  "label": "last_in 舰队面板",
+  "description": "每个 Bot Chat 的末回合输入 token（last_in，含缓存命中 ≈ 当前上下文实长）；≥250k 警示，与轮换 cron 同口径",
+  "icon": "Gauge",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

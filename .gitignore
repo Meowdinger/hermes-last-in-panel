@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# 内部交接件与验收记录（含组织内部信息，不发布）
+HANDOFF-*.md
+
+# macOS
+.DS_Store
